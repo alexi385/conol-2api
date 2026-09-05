@@ -67,7 +67,8 @@ func (p *TokenPool) Remove(c *conol.Client) {
 // ─── 服务器 ───
 
 type Server struct {
-	pool *TokenPool
+	pool      *TokenPool
+	tokenFile string
 }
 
 // creditErrorRE 匹配余额不足错误
@@ -295,6 +296,63 @@ func (s *Server) handleBilling(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, bal)
 }
 
+// 新增：admin 页面用于添加 token 并查看模型/余额
+func (s *Server) handleAdminAddToken(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		writeJSON(w, 405, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var payload struct {
+		Token   string `json:"token"`
+		Passkey string `json:"passkey"`
+		Email   string `json:"email"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeJSON(w, 400, map[string]string{"error": "invalid JSON: " + err.Error()})
+		return
+	}
+	payload.Token = strings.TrimSpace(payload.Token)
+	if payload.Token == "" {
+		writeJSON(w, 400, map[string]string{"error": "token required"})
+		return
+	}
+	line := payload.Token + "|" + payload.Passkey + "|" + payload.Email + "\n"
+	filePath := s.tokenFile
+	if filePath == "" {
+		filePath = "tokens.txt"
+	}
+	f, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": err.Error()})
+		return
+	}
+	if _, err := f.WriteString(line); err != nil {
+		f.Close()
+		writeJSON(w, 500, map[string]string{"error": err.Error()})
+		return
+	}
+	f.Close()
+
+	// 尝试创建 client 并验证
+	c := conol.New(payload.Token, payload.Passkey)
+	sess, err := c.GetSession()
+	if err != nil || sess == nil {
+		// 写入文件已完成，但客户端验证失败，返回警告
+		writeJSON(w, 200, map[string]interface{}{"status": "saved_but_invalid", "error": errErrorString(err)})
+		return
+	}
+	// 有效则加入池
+	s.pool.Add(c)
+	writeJSON(w, 200, map[string]interface{}{"status": "ok", "email": sess.Email})
+}
+
+func errErrorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
 // ─── 辅助 ───
 
 // modelMap OpenAI 模型名 → conol.ai agentModel (从网页抓包验证)
@@ -407,13 +465,17 @@ func main() {
 		log.Println("   tokens.txt 格式: token|passkey|email (一行一个)")
 	}
 
-	srv := &Server{pool: pool}
+	srv := &Server{pool: pool, tokenFile: *tokenFile}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/chat/completions", srv.handleChat)
 	mux.HandleFunc("/v1/models", srv.handleModels)
 	mux.HandleFunc("/health", srv.handleHealth)
 	mux.HandleFunc("/v1/billing", srv.handleBilling)
+
+	// admin 静态页面和接口
+	mux.Handle("/admin/", http.StripPrefix("/admin/", http.FileServer(http.Dir("admin"))))
+	mux.HandleFunc("/admin/add-token", srv.handleAdminAddToken)
 
 	// 定期健康检查 (每5分钟)
 	go func() {
@@ -430,6 +492,6 @@ func main() {
 	addr := fmt.Sprintf(":%d", *port)
 	log.Printf("🚀 Conol.ai → OpenAI 反代 http://localhost%s", addr)
 	log.Printf("📋 Token 池: %d 个", pool.Size())
-	log.Printf("📍 端点: /v1/chat/completions  /v1/models  /health")
+	log.Printf("📍 端点: /v1/chat/completions  /v1/models  /health  /admin/")
 	log.Fatal(http.ListenAndServe(addr, mux))
 }
