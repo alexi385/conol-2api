@@ -6,36 +6,60 @@
   <title>Conol Proxy 管理</title>
   <style>
     body{font-family:system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;margin:24px}
-    label{display:block;margin-top:12px}
-    input{width:100%;padding:8px;margin-top:4px}
-    button{margin-top:12px;padding:8px 12px}
-    .box{max-width:720px}
-    pre{background:#f6f8fa;padding:12px;border-radius:6px}
+    .tabs{display:flex;gap:8px;margin-bottom:12px}
+    .tab{padding:8px 12px;border:1px solid #ddd;border-bottom:none;background:#f6f8fa;cursor:pointer}
+    .tab.active{background:#fff;font-weight:600}
+    .panel{border:1px solid #ddd;padding:12px;border-radius:4px}
+    label{display:block;margin-top:8px}
+    input{padding:6px;margin-top:4px}
+    button{margin-top:8px;padding:6px 10px}
+    table{width:100%;border-collapse:collapse;margin-top:8px}
+    th,td{border:1px solid #eee;padding:8px;text-align:left}
+    .small{font-size:13px;color:#666}
+    .actions button{margin-right:6px}
+    .box{max-width:960px}
   </style>
 </head>
 <body>
   <div class="box">
     <h1>Conol Proxy 管理</h1>
-    <section>
-      <h2>添加 Token</h2>
-      <label>session_token<input id="token" placeholder="session token"></label>
-      <label>passkey<input id="passkey" placeholder="passkey (可选)"></label>
-      <label>email<input id="email" placeholder="email (可选)"></label>
-      <button id="save">保存到 tokens.txt 并加入池</button>
-      <div id="saveResult" style="margin-top:8px"></div>
-    </section>
 
-    <section>
+    <div class="tabs">
+      <div class="tab active" data-tab="tokens">Tokens</div>
+      <div class="tab" data-tab="models">Models</div>
+      <div class="tab" data-tab="billing">Billing</div>
+    </div>
+
+    <div id="tokens" class="panel">
+      <h2>Tokens 管理</h2>
+      <div style="display:flex;gap:12px;align-items:flex-end">
+        <div style="flex:1">
+          <label>session_token<input id="token" placeholder="session token" style="width:100%"></label>
+          <label>passkey<input id="passkey" placeholder="passkey (可选)" style="width:100%"></label>
+          <label>email<input id="email" placeholder="email (可选)" style="width:100%"></label>
+        </div>
+        <div style="width:220px">
+          <button id="save">保存到 tokens.txt 并加入池</button>
+          <div id="saveResult" class="small"></div>
+        </div>
+      </div>
+
+      <h3 style="margin-top:16px">已保存 Tokens</h3>
+      <div id="tokensTableWrap">加载中...</div>
+    </div>
+
+    <div id="models" class="panel" style="display:none">
       <h2>支持的模型</h2>
       <button id="refreshModels">刷新模型列表</button>
-      <pre id="models">(未加载)</pre>
-    </section>
+      <div id="modelsTableWrap" style="margin-top:8px">(未加载)</div>
+    </div>
 
-    <section>
+    <div id="billing" class="panel" style="display:none">
       <h2>余额 / 额度</h2>
       <button id="refreshBalance">刷新余额</button>
-      <pre id="balance">(未加载)</pre>
-    </section>
+      <div id="balanceWrap" style="margin-top:8px">(未加载)</div>
+    </div>
+
   </div>
 
   <script src="./app.js"></script>

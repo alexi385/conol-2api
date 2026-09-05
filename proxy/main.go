@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -99,37 +100,20 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-
-
-		// 上传图片到 /api/assets
-		if len(uploads) > 0 {
-			log.Printf("Uploading %d images...", len(uploads))
+	// 上传图片到 /api/assets
+	if len(uploads) > 0 {
+		log.Printf("Uploading %d images...", len(uploads))
+	}
+	for _, up := range uploads {
+		asset, err := client.UploadAsset(up.RawBytes, up.MediaType)
+		if err != nil {
+			log.Printf("Image upload failed: %v", err)
+			writeJSON(w, 500, map[string]string{"error": "image upload failed: " + err.Error()})
+			return
 		}
-		for _, up := range uploads {
-			asset, err := client.UploadAsset(up.RawBytes, up.MediaType)
-			if err != nil {
-				log.Printf("Image upload failed: %v", err)
-				writeJSON(w, 500, map[string]string{"error": "image upload failed: " + err.Error()})
-				return
-			}
-			conolMsgs[up.MsgIndex].Content = asset.URL
-			log.Printf("Image uploaded: %s", asset.URL)
-		}
-
-		// 上传图片到 /api/assets
-		if len(uploads) > 0 {
-			log.Printf("Uploading %d images...", len(uploads))
-		}
-		for _, up := range uploads {
-			asset, err := client.UploadAsset(up.RawBytes, up.MediaType)
-			if err != nil {
-				log.Printf("Image upload failed: %v", err)
-				writeJSON(w, 500, map[string]string{"error": "image upload failed: " + err.Error()})
-				return
-			}
-			conolMsgs[up.MsgIndex].Content = asset.URL
-			log.Printf("Image uploaded: %s", asset.URL)
-		}
+		conolMsgs[up.MsgIndex].Content = asset.URL
+		log.Printf("Image uploaded: %s", asset.URL)
+	}
 
 	// 构建系统提示词（含工具定义）
 	if sp := openai.BuildSystemPrompt(&req); sp != "" {
@@ -143,8 +127,8 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// 模型映射
 	timezone := "Asia/Shanghai"
 	agentModel := resolveAgentModel(req.Model)
-		modelOpts := buildModelOpts(req.Model)
-		log.Printf("🔍 模型解析: 用户=%s → agentModel=%s", req.Model, agentModel)
+	modelOpts := buildModelOpts(req.Model)
+	log.Printf("🔍 模型解析: 用户=%s → agentModel=%s", req.Model, agentModel)
 
 	// 创建 conol.ai 会话
 	resp, err := client.CreateSession(conolMsgs, systemPrompt, timezone, modelOpts)
@@ -296,7 +280,154 @@ func (s *Server) handleBilling(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, bal)
 }
 
-// 新增：admin 页面用于添加 token 并查看模型/余额
+// 管理 tokens：列出 /admin/tokens，更新 PUT /admin/token?id=，删除 DELETE /admin/token?id=
+func (s *Server) handleAdminListTokens(w http.ResponseWriter, r *http.Request) {
+	filePath := s.tokenFile
+	if filePath == "" {
+		filePath = "tokens.txt"
+	}
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		// 如果文件不存在，返回空列表
+		if os.IsNotExist(err) {
+			writeJSON(w, 200, []interface{}{})
+			return
+		}
+		writeJSON(w, 500, map[string]string{"error": err.Error()})
+		return
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	out := []map[string]string{}
+	for i, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "|", 3)
+		tk := parts[0]
+		pk := ""
+		em := ""
+		if len(parts) >= 2 {
+			pk = parts[1]
+		}
+		if len(parts) >= 3 {
+			em = parts[2]
+		}
+		out = append(out, map[string]string{"id": strconv.Itoa(i), "token": tk, "passkey": pk, "email": em})
+	}
+	writeJSON(w, 200, out)
+}
+
+func (s *Server) reloadTokens() {
+	filePath := s.tokenFile
+	if filePath == "" {
+		filePath = "tokens.txt"
+	}
+	clients := loadTokens(filePath)
+	// replace pool clients safely
+	s.pool.mu.Lock()
+	defer s.pool.mu.Unlock()
+	s.pool.clients = clients
+}
+
+func (s *Server) handleAdminDeleteToken(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "DELETE" {
+		writeJSON(w, 405, map[string]string{"error": "method not allowed"})
+		return
+	}
+	idStr := r.URL.Query().Get("id")
+	if idStr == "" {
+		writeJSON(w, 400, map[string]string{"error": "id required"})
+		return
+	}
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		writeJSON(w, 400, map[string]string{"error": "invalid id"})
+		return
+	}
+	filePath := s.tokenFile
+	if filePath == "" {
+		filePath = "tokens.txt"
+	}
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": err.Error()})
+		return
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if id < 0 || id >= len(lines) {
+		writeJSON(w, 400, map[string]string{"error": "id out of range"})
+		return
+	}
+	// remove line
+	newLines := append(lines[:id], lines[id+1:]...)
+	out := strings.Join(newLines, "\n")
+	if len(out) > 0 {
+		out += "\n"
+	}
+	if err := os.WriteFile(filePath, []byte(out), 0600); err != nil {
+		writeJSON(w, 500, map[string]string{"error": err.Error()})
+		return
+	}
+	// reload pool
+	s.reloadTokens()
+	writeJSON(w, 200, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleAdminUpdateToken(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "PUT" {
+		writeJSON(w, 405, map[string]string{"error": "method not allowed"})
+		return
+	}
+	idStr := r.URL.Query().Get("id")
+	if idStr == "" {
+		writeJSON(w, 400, map[string]string{"error": "id required"})
+		return
+	}
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		writeJSON(w, 400, map[string]string{"error": "invalid id"})
+		return
+	}
+	var payload struct {
+		Token   string `json:"token"`
+		Passkey string `json:"passkey"`
+		Email   string `json:"email"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeJSON(w, 400, map[string]string{"error": "invalid JSON: " + err.Error()})
+		return
+	}
+	filePath := s.tokenFile
+	if filePath == "" {
+		filePath = "tokens.txt"
+	}
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": err.Error()})
+		return
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if id < 0 || id >= len(lines) {
+		writeJSON(w, 400, map[string]string{"error": "id out of range"})
+		return
+	}
+	newLine := payload.Token + "|" + payload.Passkey + "|" + payload.Email
+	lines[id] = newLine
+	out := strings.Join(lines, "\n")
+	if len(out) > 0 {
+		out += "\n"
+	}
+	if err := os.WriteFile(filePath, []byte(out), 0600); err != nil {
+		writeJSON(w, 500, map[string]string{"error": err.Error()})
+		return
+	}
+	// reload pool
+	s.reloadTokens()
+	writeJSON(w, 200, map[string]string{"status": "ok"})
+}
+
+// 新增：admin 页面用于添加 token 并查看模型/余额（保留原 add-token 接口）
 func (s *Server) handleAdminAddToken(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		writeJSON(w, 405, map[string]string{"error": "method not allowed"})
@@ -339,6 +470,8 @@ func (s *Server) handleAdminAddToken(w http.ResponseWriter, r *http.Request) {
 	if err != nil || sess == nil {
 		// 写入文件已完成，但客户端验证失败，返回警告
 		writeJSON(w, 200, map[string]interface{}{"status": "saved_but_invalid", "error": errErrorString(err)})
+		// 仍尝试 reload to pick up appended line
+		s.reloadTokens()
 		return
 	}
 	// 有效则加入池
@@ -356,12 +489,12 @@ func errErrorString(err error) string {
 // ─── 辅助 ───
 
 // modelMap OpenAI 模型名 → conol.ai agentModel (从网页抓包验证)
-	var modelPresetMap = map[string]string{
-		"gpt-5.6-sol":   "pro",
-		"gpt-5.6-terra": "pro",
-		"gpt-5.6-luna":  "pro",
-		"gpt-5.5-pro":   "pro",
-	}
+var modelPresetMap = map[string]string{
+	"gpt-5.6-sol":   "pro",
+	"gpt-5.6-terra": "pro",
+	"gpt-5.6-luna":  "pro",
+	"gpt-5.5-pro":   "pro",
+}
 
 var modelMap = map[string]string{
 	"deepseek-v4-pro":      "deepseek/deepseek-v4-pro",
@@ -475,7 +608,19 @@ func main() {
 
 	// admin 静态页面和接口
 	mux.Handle("/admin/", http.StripPrefix("/admin/", http.FileServer(http.Dir("admin"))))
+	mux.HandleFunc("/admin", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/admin/", http.StatusMovedPermanently) })
 	mux.HandleFunc("/admin/add-token", srv.handleAdminAddToken)
+	mux.HandleFunc("/admin/tokens", srv.handleAdminListTokens)
+	mux.HandleFunc("/admin/token", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case "DELETE":
+			s.handleAdminDeleteToken(w, r)
+		case "PUT":
+			s.handleAdminUpdateToken(w, r)
+		default:
+			writeJSON(w, 405, map[string]string{"error": "method not allowed"})
+		}
+	})
 
 	// 定期健康检查 (每5分钟)
 	go func() {
